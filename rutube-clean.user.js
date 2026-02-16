@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RuTube Cleaner by dah9
 // @namespace    https://github.com/dah9l
-// @version      1.3
+// @version      1.4
 // @description  Удаляет лишние элементы интерфейса RuTube: кнопки подписки, безопасный режим, футер и прочее
 // @author       dah9
 // @match        *://rutube.ru/*
@@ -17,9 +17,9 @@
     'use strict';
 
     // =============================================
-    // Тексты элементов для удаления (по содержимому)
+    // Тексты элементов для удаления (Set для O(1) поиска)
     // =============================================
-    const TEXTS_TO_REMOVE = [
+    const TEXTS_TO_REMOVE = new Set([
         'Оформить подписку',
         'Активировать промокод',
         'Безопасный режим',
@@ -46,286 +46,218 @@
         'Правовая информация',
         'Рекомендательная система',
         'Фирменный стиль',
-    ];
+    ]);
 
     // =============================================
-    // Ссылки для удаления (по href)
+    // Ссылки для удаления — единый regex вместо массива .some()
     // =============================================
-    const HREFS_TO_REMOVE = [
-        '/info/about',
-        '/info/activity',
-        '/info/agreement',
-        '/info/privacy',
-        '/info/legal',
-        '/info/recommendatory',
-        '/info/recomlegal',
-        '/info/brandbook',
-        '/brand/',
-        '/info/faq',
-        '/info/report',
-        '/info/support',
-        'help@rutube.ru',
-        'premier.one',
-        'start.ru',
-        'apps.apple.com',
-        'play.google.com',
-        'appgallery.huawei.com',
-        'apps.rustore.ru',
-        'nashstore.ru',
-        'vk.com/rutube',
-        't.me/rutube',
-        'ok.ru/rutube',
-        'dzen.ru/rutube',
-        'tiktok.com/@rutube',
-    ];
+    const HREFS_RE = /\/info\/(?:about|activity|agreement|privacy|legal|recommendatory|recomlegal|brandbook|faq|report|support)|\/brand\/|help@rutube\.ru|premier\.one|start\.ru|apps\.apple\.com|play\.google\.com|appgallery\.huawei\.com|apps\.rustore\.ru|nashstore\.ru|vk\.com\/rutube|t\.me\/rutube|ok\.ru\/rutube|dzen\.ru\/rutube|tiktok\.com\/@rutube/;
 
     // Ссылки, которые удаляем ТОЛЬКО внутри футера (не из бокового меню)
-    const HREFS_TO_REMOVE_FOOTER_ONLY = [
-        '/apps',
-        'smarttv',
-        '/kids',
-        '/sport',
-    ];
+    const HREFS_FOOTER_RE = /\/apps|smarttv|\/kids|\/sport/;
 
     // =============================================
-    // CSS-селекторы для удаления целых блоков
+    // CSS-селекторы — объединённый селектор (один querySelectorAll вместо 15)
     // =============================================
-    const SELECTORS_TO_REMOVE = [
-        // Кнопка «Оформить подписку»
+    const COMBINED_SELECTOR = [
         '.premium-subscription-entrypoint-module__premium-entrypoint',
-        // Кнопка «Безопасный режим»
         '.safe-mode-header-entrypoint-module__entrypoint',
-        // Баннеры скачивания приложения
         '[class*="app-banner"]',
         '[class*="app-download"]',
         '[class*="apps-module"]',
         '[class*="mobile-app"]',
         '[class*="download-app"]',
-        // Блок «SMART TV» и прочие guide-ссылки в меню
         '[class*="menu-guide-module"]',
-        // Блок «Оставьте отзыв» (Вопросы и ответы, Сообщить о проблеме, Написать в поддержку, help@rutube.ru)
         'ul[aria-label="Оставте отзыв"]',
         'ul[aria-label="Оставьте отзыв"]',
-        // RUTUBE x PREMIER / RUTUBE x START в боковом меню
         'li:has(> a[href="/feeds/premier/"])',
         'li:has(> a[href="/feeds/start/"])',
-        // Подвал (футер) — основной контейнер (не трогаем menu-footer-module с кнопкой «Выйти»)
         '[class*="wdp-footer"]',
         '[class*="bottom-footer"]',
         '[class*="page-footer-module"]',
         'footer[class*="footer-module"]:not([class*="menu-footer"])',
-    ];
+    ].join(', ');
+
+    // Regex для иконок магазинов приложений
+    const APP_STORE_RE = /app.store|google.play|rustore|huawei|nashstore|скачать|appgallery/i;
+
+    // Regex для копирайта
+    const COPYRIGHT_RE = /^©\s*\d{4},?\s*RUTUBE$/i;
+    const COPYRIGHT_HTML = '© 2026, RUTUBE edit by <a href="https://github.com/dah9l" target="_blank" rel="noopener noreferrer" style="color: #00A1E7; text-decoration: underline;">dah9</a>';
+
+    // Кэш для проверок принадлежности к меню/навигации/футеру (WeakMap — не мешает GC)
+    const menuCache = new WeakMap();
+    const navCache = new WeakMap();
+    const footerCache = new WeakMap();
 
     /**
      * Удаляет элемент и, если родитель пуст, удаляет и его
      */
     function removeElement(el) {
-        if (!el) return;
+        if (!el || !el.parentElement) return;
         const parent = el.parentElement;
         el.remove();
-        // Если родительский контейнер стал пустым — тоже удаляем
-        if (parent && parent.children.length === 0 && parent.textContent.trim() === '') {
+        if (parent.children.length === 0 && parent.textContent.trim() === '') {
             parent.remove();
         }
     }
 
     /**
-     * Находит ближайший «значимый» родительский блок для ссылки/кнопки
-     * (секция, блок навигации, карточка и т.д.)
-     * Внутри бокового меню — поднимается только до <li>, не выше
+     * Проверяет, находится ли элемент внутри бокового меню (с кэшем)
+     */
+    function isInsideMenu(el) {
+        if (menuCache.has(el)) return menuCache.get(el);
+        let current = el;
+        while (current) {
+            if (current.className && /menu-content-module|wdp-mobile-menu/i.test(current.className)) {
+                menuCache.set(el, true);
+                return true;
+            }
+            current = current.parentElement;
+        }
+        menuCache.set(el, false);
+        return false;
+    }
+
+    /**
+     * Проверяет, является ли элемент навигационным пунктом меню (с кэшем)
+     */
+    function isNavigationItem(el) {
+        if (navCache.has(el)) return navCache.get(el);
+        const re = /menu-link-module|menu-links-module|navigation_group/i;
+        let current = el;
+        for (let i = 0; i < 4 && current; i++) {
+            if (current.className && re.test(current.className)) {
+                navCache.set(el, true);
+                return true;
+            }
+            current = current.parentElement;
+        }
+        navCache.set(el, false);
+        return false;
+    }
+
+    /**
+     * Проверяет, находится ли элемент внутри футера (с кэшем)
+     */
+    function isInsideFooter(el) {
+        if (footerCache.has(el)) return footerCache.get(el);
+        let current = el;
+        while (current) {
+            if (current.tagName === 'FOOTER' ||
+                (current.className && /footer|bottom-content/i.test(current.className))) {
+                footerCache.set(el, true);
+                return true;
+            }
+            current = current.parentElement;
+        }
+        footerCache.set(el, false);
+        return false;
+    }
+
+    /**
+     * Находит ближайший «значимый» родительский блок
+     * Внутри бокового меню — поднимается только до <li> или section menu-info
      */
     function findBlockParent(el) {
-        // Внутри бокового меню удаляем только конкретный <li>, не секцию/nav
         if (isInsideMenu(el)) {
-            const li = el.closest('li');
-            if (li) return li;
-            // Для секций menu-info внутри меню — удаляем секцию
-            const section = el.closest('section.menu-info-module__wrapper, [class*="menu-info-module__wrapper"]');
-            if (section) return section;
-            return null;
+            return el.closest('li') ||
+                   el.closest('[class*="menu-info-module__wrapper"]') ||
+                   null;
         }
-
         let current = el.parentElement;
-        const blockTags = ['SECTION', 'ARTICLE', 'ASIDE'];
-        // Не поднимаемся до NAV и основных контейнеров
-        const stopClasses = /menu-content|application-module|wdp-mobile-menu|sidebar|main-content/i;
+        const stopRe = /menu-content|application-module|wdp-mobile-menu|sidebar|main-content/i;
+        const blockRe = /footer|section|block|card|banner|widget|group|entrypoint/i;
         for (let i = 0; i < 6 && current; i++) {
-            if (current.tagName === 'NAV') return null;
-            if (current.className && stopClasses.test(current.className)) return null;
-            if (blockTags.includes(current.tagName)) return current;
-            if (current.className && (
-                /footer|section|block|card|banner|widget|group|entrypoint/i.test(current.className)
-            )) return current;
+            if (current.tagName === 'NAV' || (current.className && stopRe.test(current.className))) return null;
+            if (['SECTION', 'ARTICLE', 'ASIDE'].includes(current.tagName)) return current;
+            if (current.className && blockRe.test(current.className)) return current;
             current = current.parentElement;
         }
         return null;
     }
 
     /**
-     * Проверяет, находится ли элемент внутри бокового меню
+     * Удаляет элемент вместе с родительским блоком (если найден)
      */
-    function isInsideMenu(el) {
-        let current = el;
-        while (current) {
-            if (current.className && /menu-content-module|wdp-mobile-menu/i.test(current.className)) {
-                return true;
-            }
-            current = current.parentElement;
-        }
-        return false;
+    function removeWithParent(el) {
+        const block = findBlockParent(el);
+        removeElement(block || el);
     }
 
-    /**
-     * Проверяет, является ли элемент навигационным пунктом меню (Главная, Каталог, и т.д.)
-     * Такие пункты НЕ нужно удалять
-     */
-    function isNavigationItem(el) {
-        const navClasses = /menu-link-module|menu-links-module|navigation_group/i;
-        let current = el;
-        for (let i = 0; i < 4 && current; i++) {
-            if (current.className && navClasses.test(current.className)) return true;
-            current = current.parentElement;
-        }
-        return false;
-    }
-
-    /**
-     * Проверяет, находится ли элемент внутри футера
-     */
-    function isInsideFooter(el) {
-        let current = el;
-        while (current) {
-            if (current.tagName === 'FOOTER') return true;
-            if (current.className && /footer/i.test(current.className)) return true;
-            if (current.className && /bottom-content/i.test(current.className)) return true;
-            current = current.parentElement;
-        }
-        return false;
-    }
+    // =============================================
+    // Флаг для приостановки observer во время очистки
+    // =============================================
+    let cleaning = false;
 
     /**
      * Основная функция очистки
      */
     function cleanPage() {
-        // 1. Удалить по CSS-селекторам
-        SELECTORS_TO_REMOVE.forEach(selector => {
-            try {
-                document.querySelectorAll(selector).forEach(el => removeElement(el));
-            } catch (e) { /* игнорируем ошибки невалидных селекторов */ }
-        });
+        if (cleaning) return;
+        cleaning = true;
 
-        // 2. Удалить элементы по текстовому содержимому
-        const allElements = document.querySelectorAll('a, button, span, div, p, h1, h2, h3, h4, h5, h6, li, section');
-        allElements.forEach(el => {
-            if (isNavigationItem(el)) return; // Не трогаем навигационные пункты меню
-            const text = el.textContent.trim();
-            TEXTS_TO_REMOVE.forEach(target => {
-                if (text === target) {
-                    // Попробовать удалить родительский блок
-                    const blockParent = findBlockParent(el);
-                    if (blockParent) {
-                        removeElement(blockParent);
-                    } else {
-                        removeElement(el);
+        try {
+            // 1. Удалить по объединённому CSS-селектору (один вызов вместо 15)
+            document.querySelectorAll(COMBINED_SELECTOR).forEach(removeElement);
+
+            // 2. Удалить элементы по тексту + ссылки по href (один обход DOM)
+            document.querySelectorAll('a, button, span, div, p, h1, h2, h3, h4, h5, h6, li, section').forEach(el => {
+                if (isNavigationItem(el)) return;
+
+                // Проверка текста
+                const text = el.textContent.trim();
+                if (TEXTS_TO_REMOVE.has(text)) {
+                    removeWithParent(el);
+                    return;
+                }
+
+                // Проверка href (только для ссылок, совмещаем шаги 3 и 5)
+                if (el.tagName === 'A') {
+                    const href = el.getAttribute('href') || '';
+                    if (HREFS_RE.test(href)) {
+                        removeWithParent(el);
+                    } else if (HREFS_FOOTER_RE.test(href) && isInsideFooter(el)) {
+                        removeWithParent(el);
                     }
                 }
             });
-        });
 
-        // 3. Удалить ссылки по href
-        document.querySelectorAll('a[href]').forEach(a => {
-            if (isNavigationItem(a)) return; // Не трогаем навигационные пункты меню
-            const href = a.getAttribute('href') || '';
-            let shouldRemove = HREFS_TO_REMOVE.some(target => href.includes(target));
-            // Ссылки, которые удаляем только в футере
-            if (!shouldRemove && isInsideFooter(a)) {
-                shouldRemove = HREFS_TO_REMOVE_FOOTER_ONLY.some(target => href.includes(target));
-            }
-            if (shouldRemove) {
-                const blockParent = findBlockParent(a);
-                if (blockParent) {
-                    removeElement(blockParent);
-                } else {
-                    removeElement(a);
+            // 3. Удалить кнопки скачивания приложений по иконкам
+            document.querySelectorAll('img[src], img[alt]').forEach(img => {
+                const alt = img.getAttribute('alt') || '';
+                const src = img.getAttribute('src') || '';
+                if (APP_STORE_RE.test(alt) || APP_STORE_RE.test(src)) {
+                    removeWithParent(img.closest('a') || img);
                 }
-            }
-        });
+            });
 
-        // 4. Удалить кнопки скачивания приложений (по иконкам app store и т.д.)
-        document.querySelectorAll('img[src], img[alt]').forEach(img => {
-            const alt = (img.getAttribute('alt') || '').toLowerCase();
-            const src = (img.getAttribute('src') || '').toLowerCase();
-            if (
-                alt.includes('app store') ||
-                alt.includes('google play') ||
-                alt.includes('rustore') ||
-                alt.includes('huawei') ||
-                alt.includes('nashstore') ||
-                alt.includes('скачать') ||
-                src.includes('app-store') ||
-                src.includes('google-play') ||
-                src.includes('rustore') ||
-                src.includes('appgallery') ||
-                src.includes('nashstore')
-            ) {
-                const blockParent = findBlockParent(img);
-                if (blockParent) {
-                    removeElement(blockParent);
-                } else {
-                    removeElement(img.closest('a') || img);
+            // 4. Изменить копирайт
+            document.querySelectorAll('[class*="copyright"], [class*="menu-info-module"] p, footer p, footer span').forEach(el => {
+                if (el.childElementCount === 0 && COPYRIGHT_RE.test(el.textContent.trim())) {
+                    el.innerHTML = COPYRIGHT_HTML;
                 }
-            }
-        });
+            });
 
-        // 5. Удалить соцсети (блок с иконками VK, Telegram, OK, Дзен и т.д.)
-        document.querySelectorAll('a[href]').forEach(a => {
-            const href = a.getAttribute('href') || '';
-            if (
-                href.includes('vk.com/rutube') ||
-                href.includes('t.me/rutube') ||
-                href.includes('ok.ru/rutube') ||
-                href.includes('dzen.ru/rutube') ||
-                href.includes('tiktok.com/@rutube')
-            ) {
-                removeElement(a);
-            }
-        });
-
-        // 6. Изменить копирайт «© 20XX, RUTUBE» → «© 2026, RUTUBE edit by dah9» + ссылка на GitHub
-        const allTextNodes = document.querySelectorAll('*');
-        allTextNodes.forEach(el => {
-            const text = el.textContent.trim();
-            // Ищем элемент, содержащий только копирайт (не родительский контейнер с кучей текста)
-            if (/^©\s*\d{4},?\s*RUTUBE$/i.test(text) && el.children.length === 0) {
-                el.innerHTML = '© 2026, RUTUBE edit by <a href="https://github.com/dah9l" target="_blank" rel="noopener noreferrer" style="color: #00A1E7; text-decoration: underline;">dah9</a>';
-            }
-        });
-
-        // Также пробуем найти в контейнерах, где копирайт — часть дочернего элемента
-        document.querySelectorAll('span, div, p, small, footer').forEach(el => {
-            if (el.childElementCount === 0) {
-                const text = el.textContent.trim();
-                if (/©\s*\d{4},?\s*RUTUBE/i.test(text) && text.length < 30) {
-                    el.innerHTML = '© 2026, RUTUBE edit by <a href="https://github.com/dah9l" target="_blank" rel="noopener noreferrer" style="color: #00A1E7; text-decoration: underline;">dah9</a>';
-                }
-            }
-        });
+        } finally {
+            cleaning = false;
+        }
     }
 
     // =============================================
     // Запуск: первичная очистка + наблюдатель за DOM
     // =============================================
 
-    // Первый запуск с задержкой, чтобы SPA успел отрисоваться
-    setTimeout(cleanPage, 1500);
+    // Первый запуск — быстро + повтор после полной загрузки SPA
+    setTimeout(cleanPage, 1000);
     setTimeout(cleanPage, 3000);
-    setTimeout(cleanPage, 5000);
 
-    // MutationObserver — отслеживает изменения DOM (переходы между страницами SPA)
+    // MutationObserver — с debounce и проверкой флага cleaning
     let debounceTimer = null;
     const observer = new MutationObserver(() => {
+        if (cleaning) return;
         if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(cleanPage, 500);
+        debounceTimer = setTimeout(cleanPage, 400);
     });
 
     observer.observe(document.body, {
@@ -333,15 +265,13 @@
         subtree: true,
     });
 
-    // Также очищаем при навигации (SPA pushState / popstate)
-    const originalPushState = history.pushState;
+    // Очистка при SPA-навигации
+    const origPush = history.pushState;
     history.pushState = function () {
-        originalPushState.apply(this, arguments);
-        setTimeout(cleanPage, 1000);
+        origPush.apply(this, arguments);
+        setTimeout(cleanPage, 800);
     };
-    window.addEventListener('popstate', () => {
-        setTimeout(cleanPage, 1000);
-    });
+    window.addEventListener('popstate', () => setTimeout(cleanPage, 800));
 
-    console.log('[RuTube Cleaner by dah9] Скрипт загружен');
+    console.log('[RuTube Cleaner by dah9] v1.4 загружен');
 })();
