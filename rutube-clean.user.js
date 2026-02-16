@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RuTube Cleaner by dah9
 // @namespace    https://github.com/dah9l
-// @version      1.0
+// @version      1.1
 // @description  Удаляет лишние элементы интерфейса RuTube: кнопки подписки, безопасный режим, футер и прочее
 // @author       dah9
 // @match        *://rutube.ru/*
@@ -27,7 +27,6 @@
         'RUTUBE всегда с вами',
         'Больше от Rutube',
         'Больше от RUTUBE',
-        'Smart TV',
         'RUTUBE детям',
         'RUTUBE Детям',
         'RUTUBE Спорт',
@@ -65,20 +64,24 @@
         'help@rutube.ru',
         'premier.one',
         'start.ru',
-        '/apps',
         'apps.apple.com',
         'play.google.com',
         'appgallery.huawei.com',
         'apps.rustore.ru',
         'nashstore.ru',
-        'smarttv',
-        '/kids',
-        '/sport',
         'vk.com/rutube',
         't.me/rutube',
         'ok.ru/rutube',
         'dzen.ru/rutube',
         'tiktok.com/@rutube',
+    ];
+
+    // Ссылки, которые удаляем ТОЛЬКО внутри футера (не из бокового меню)
+    const HREFS_TO_REMOVE_FOOTER_ONLY = [
+        '/apps',
+        'smarttv',
+        '/kids',
+        '/sport',
     ];
 
     // =============================================
@@ -121,7 +124,10 @@
     function findBlockParent(el) {
         let current = el.parentElement;
         const blockTags = ['SECTION', 'ARTICLE', 'NAV', 'ASIDE'];
+        // Не поднимаемся выше этих контейнеров — это боковое меню и основной layout
+        const stopClasses = /menu-content|application-module|wdp-mobile-menu|sidebar|main-content/i;
         for (let i = 0; i < 6 && current; i++) {
+            if (current.className && stopClasses.test(current.className)) return null;
             if (blockTags.includes(current.tagName)) return current;
             if (current.className && (
                 /footer|section|block|card|banner|widget|group|entrypoint/i.test(current.className)
@@ -129,6 +135,36 @@
             current = current.parentElement;
         }
         return null;
+    }
+
+    /**
+     * Проверяет, находится ли элемент внутри бокового меню
+     */
+    function isInsideMenu(el) {
+        let current = el;
+        while (current) {
+            if (current.className && /menu-content|wdp-mobile-menu|sidebar-module|menu-module/i.test(current.className)) {
+                return true;
+            }
+            if (current.tagName === 'NAV') return true;
+            current = current.parentElement;
+        }
+        return false;
+    }
+
+    /**
+     * Проверяет, находится ли элемент внутри футера
+     */
+    function isInsideFooter(el) {
+        let current = el;
+        while (current) {
+            if (current.tagName === 'FOOTER') return true;
+            if (current.className && /footer/i.test(current.className)) return true;
+            // Блок "bottom-content" — нижняя часть страницы
+            if (current.className && /bottom-content|bottom-bar/i.test(current.className)) return true;
+            current = current.parentElement;
+        }
+        return false;
     }
 
     /**
@@ -142,9 +178,10 @@
             } catch (e) { /* игнорируем ошибки невалидных селекторов */ }
         });
 
-        // 2. Удалить элементы по текстовому содержимому
+        // 2. Удалить элементы по текстовому содержимому (НЕ в боковом меню)
         const allElements = document.querySelectorAll('a, button, span, div, p, h1, h2, h3, h4, h5, h6, li, section');
         allElements.forEach(el => {
+            if (isInsideMenu(el)) return; // Не трогаем боковое меню
             const text = el.textContent.trim();
             TEXTS_TO_REMOVE.forEach(target => {
                 if (text === target) {
@@ -159,19 +196,23 @@
             });
         });
 
-        // 3. Удалить ссылки по href
+        // 3. Удалить ссылки по href (НЕ в боковом меню)
         document.querySelectorAll('a[href]').forEach(a => {
+            if (isInsideMenu(a)) return; // Не трогаем боковое меню
             const href = a.getAttribute('href') || '';
-            HREFS_TO_REMOVE.forEach(target => {
-                if (href.includes(target)) {
-                    const blockParent = findBlockParent(a);
-                    if (blockParent) {
-                        removeElement(blockParent);
-                    } else {
-                        removeElement(a);
-                    }
+            let shouldRemove = HREFS_TO_REMOVE.some(target => href.includes(target));
+            // Ссылки, которые удаляем только в футере
+            if (!shouldRemove && isInsideFooter(a)) {
+                shouldRemove = HREFS_TO_REMOVE_FOOTER_ONLY.some(target => href.includes(target));
+            }
+            if (shouldRemove) {
+                const blockParent = findBlockParent(a);
+                if (blockParent) {
+                    removeElement(blockParent);
+                } else {
+                    removeElement(a);
                 }
-            });
+            }
         });
 
         // 4. Удалить кнопки скачивания приложений (по иконкам app store и т.д.)
