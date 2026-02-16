@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RuTube Cleaner by dah9
 // @namespace    https://github.com/dah9l
-// @version      1.1
+// @version      1.2
 // @description  Удаляет лишние элементы интерфейса RuTube: кнопки подписки, безопасный режим, футер и прочее
 // @author       dah9
 // @match        *://rutube.ru/*
@@ -57,7 +57,9 @@
         '/info/privacy',
         '/info/legal',
         '/info/recommendatory',
+        '/info/recomlegal',
         '/info/brandbook',
+        '/brand/',
         '/info/faq',
         '/info/report',
         '/info/support',
@@ -120,13 +122,25 @@
     /**
      * Находит ближайший «значимый» родительский блок для ссылки/кнопки
      * (секция, блок навигации, карточка и т.д.)
+     * Внутри бокового меню — поднимается только до <li>, не выше
      */
     function findBlockParent(el) {
+        // Внутри бокового меню удаляем только конкретный <li>, не секцию/nav
+        if (isInsideMenu(el)) {
+            const li = el.closest('li');
+            if (li) return li;
+            // Для секций menu-info внутри меню — удаляем секцию
+            const section = el.closest('section.menu-info-module__wrapper, [class*="menu-info-module__wrapper"]');
+            if (section) return section;
+            return null;
+        }
+
         let current = el.parentElement;
-        const blockTags = ['SECTION', 'ARTICLE', 'NAV', 'ASIDE'];
-        // Не поднимаемся выше этих контейнеров — это боковое меню и основной layout
+        const blockTags = ['SECTION', 'ARTICLE', 'ASIDE'];
+        // Не поднимаемся до NAV и основных контейнеров
         const stopClasses = /menu-content|application-module|wdp-mobile-menu|sidebar|main-content/i;
         for (let i = 0; i < 6 && current; i++) {
+            if (current.tagName === 'NAV') return null;
             if (current.className && stopClasses.test(current.className)) return null;
             if (blockTags.includes(current.tagName)) return current;
             if (current.className && (
@@ -143,10 +157,23 @@
     function isInsideMenu(el) {
         let current = el;
         while (current) {
-            if (current.className && /menu-content|wdp-mobile-menu|sidebar-module|menu-module/i.test(current.className)) {
+            if (current.className && /menu-content-module|wdp-mobile-menu/i.test(current.className)) {
                 return true;
             }
-            if (current.tagName === 'NAV') return true;
+            current = current.parentElement;
+        }
+        return false;
+    }
+
+    /**
+     * Проверяет, является ли элемент навигационным пунктом меню (Главная, Каталог, и т.д.)
+     * Такие пункты НЕ нужно удалять
+     */
+    function isNavigationItem(el) {
+        const navClasses = /menu-link-module|menu-links-module|navigation_group/i;
+        let current = el;
+        for (let i = 0; i < 4 && current; i++) {
+            if (current.className && navClasses.test(current.className)) return true;
             current = current.parentElement;
         }
         return false;
@@ -160,8 +187,7 @@
         while (current) {
             if (current.tagName === 'FOOTER') return true;
             if (current.className && /footer/i.test(current.className)) return true;
-            // Блок "bottom-content" — нижняя часть страницы
-            if (current.className && /bottom-content|bottom-bar/i.test(current.className)) return true;
+            if (current.className && /bottom-content/i.test(current.className)) return true;
             current = current.parentElement;
         }
         return false;
@@ -178,10 +204,10 @@
             } catch (e) { /* игнорируем ошибки невалидных селекторов */ }
         });
 
-        // 2. Удалить элементы по текстовому содержимому (НЕ в боковом меню)
+        // 2. Удалить элементы по текстовому содержимому
         const allElements = document.querySelectorAll('a, button, span, div, p, h1, h2, h3, h4, h5, h6, li, section');
         allElements.forEach(el => {
-            if (isInsideMenu(el)) return; // Не трогаем боковое меню
+            if (isNavigationItem(el)) return; // Не трогаем навигационные пункты меню
             const text = el.textContent.trim();
             TEXTS_TO_REMOVE.forEach(target => {
                 if (text === target) {
@@ -196,9 +222,9 @@
             });
         });
 
-        // 3. Удалить ссылки по href (НЕ в боковом меню)
+        // 3. Удалить ссылки по href
         document.querySelectorAll('a[href]').forEach(a => {
-            if (isInsideMenu(a)) return; // Не трогаем боковое меню
+            if (isNavigationItem(a)) return; // Не трогаем навигационные пункты меню
             const href = a.getAttribute('href') || '';
             let shouldRemove = HREFS_TO_REMOVE.some(target => href.includes(target));
             // Ссылки, которые удаляем только в футере
