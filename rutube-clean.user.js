@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RuTube Cleaner by dah9
 // @namespace    https://github.com/dah9l
-// @version      1.2
+// @version      1.3
 // @description  Удаляет лишние элементы интерфейса RuTube: кнопки подписки, безопасный режим, футер и прочее
 // @author       dah9
 // @match        *://rutube.ru/*
@@ -21,6 +21,7 @@
     // =============================================
     const TEXTS_TO_REMOVE = [
         'Оформить подписку',
+        'Активировать промокод',
         'Безопасный режим',
         'RUTUBE x PREMIER',
         'RUTUBE x START',
@@ -100,10 +101,19 @@
         '[class*="apps-module"]',
         '[class*="mobile-app"]',
         '[class*="download-app"]',
-        // Подвал (футер) — основной контейнер
-        '[class*="footer-module"]',
+        // Блок «SMART TV» и прочие guide-ссылки в меню
+        '[class*="menu-guide-module"]',
+        // Блок «Оставьте отзыв» (Вопросы и ответы, Сообщить о проблеме, Написать в поддержку, help@rutube.ru)
+        'ul[aria-label="Оставте отзыв"]',
+        'ul[aria-label="Оставьте отзыв"]',
+        // RUTUBE x PREMIER / RUTUBE x START в боковом меню
+        'li:has(> a[href="/feeds/premier/"])',
+        'li:has(> a[href="/feeds/start/"])',
+        // Подвал (футер) — основной контейнер (не трогаем menu-footer-module с кнопкой «Выйти»)
         '[class*="wdp-footer"]',
         '[class*="bottom-footer"]',
+        '[class*="page-footer-module"]',
+        'footer[class*="footer-module"]:not([class*="menu-footer"])',
     ];
 
     /**
